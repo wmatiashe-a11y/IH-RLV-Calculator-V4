@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 import json
 import hashlib
 
@@ -37,6 +37,22 @@ def _money(x: Any) -> str:
     return f"R{s}"
 
 
+def _fmt_area(x: Any) -> str:
+    try:
+        n = float(x)
+    except Exception:
+        return str(x)
+    return f"{n:,.0f} m²".replace(",", " ")
+
+
+def _fmt_pct(x: Any, decimals: int = 2) -> str:
+    try:
+        n = float(x)
+    except Exception:
+        return str(x)
+    return f"{n*100:.{decimals}f}%"
+
+
 def _flatten(d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for k, v in (d or {}).items():
@@ -65,7 +81,6 @@ def _diff_dicts(new: Dict[str, Any], old: Dict[str, Any]) -> pd.DataFrame:
 
 
 def _card(label: str, value_html: str, hint: str = "") -> None:
-    # Pure HTML card avoids any version-specific container args
     st.markdown(
         f"""
         <div style="border:1px solid rgba(255,255,255,0.15); border-radius:14px; padding:14px;">
@@ -86,6 +101,32 @@ def _stable_bytes(data: str | bytes) -> bytes:
 
 def _hash_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()[:12]
+
+
+def _df_show(df: pd.DataFrame, *, hide_index: bool = True) -> None:
+    """
+    Streamlit-version-safe dataframe renderer.
+    Tries width="stretch" first (newer Streamlit), falls back to use_container_width=True.
+    """
+    try:
+        st.dataframe(df, width="stretch", hide_index=hide_index)
+    except TypeError:
+        try:
+            st.dataframe(df, use_container_width=True, hide_index=hide_index)
+        except TypeError:
+            # Older versions may not support hide_index
+            st.dataframe(df, use_container_width=True)
+
+
+def _plotly_show(fig) -> None:
+    """
+    Streamlit-version-safe plotly renderer.
+    Tries width="stretch" first (newer Streamlit), falls back to use_container_width=True.
+    """
+    try:
+        st.plotly_chart(fig, width="stretch")
+    except TypeError:
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # =========================================================
@@ -139,7 +180,6 @@ def load_exit_prices_from_upload(uploaded_file) -> pd.DataFrame:
     if "suburb" not in df.columns:
         raise ValueError("Exit prices CSV must include a 'suburb' column.")
 
-    # Fill missing optional columns
     defaults = {
         "exit_price_psm": np.nan,
         "recent_sales_psm": np.nan,
@@ -151,7 +191,6 @@ def load_exit_prices_from_upload(uploaded_file) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = default
 
-    # Coerce numerics
     for col in ["exit_price_psm", "recent_sales_psm", "wind_cost_uplift"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -231,7 +270,6 @@ def compute_feasibility(
     total_project_cost = total_costs_ex_profit + residual_land_value
     profit_on_cost = (profit / total_project_cost) if total_project_cost > 0 else 0.0
 
-    # IMPORTANT: keep inputs serializable + stable
     inputs_for_sensitivity = dict(
         plot_size_m2=float(plot_size_m2),
         floor_factor=float(floor_factor),
@@ -317,7 +355,7 @@ def render_waterfall(audit: Dict[str, Any]) -> None:
         )
     )
     fig.update_layout(title="Residual Land Value Waterfall", height=500, margin=dict(t=50, b=20, l=10, r=10))
-    st.plotly_chart(fig, width="stretch")
+    _plotly_show(fig)
 
 
 def render_sensitivity(inputs: Dict[str, Any]) -> None:
@@ -336,7 +374,6 @@ def render_sensitivity(inputs: Dict[str, Any]) -> None:
     xlab = [f"Build: R{int(c):,}".replace(",", " ") for c in cost_steps]
     ylab = [f"Exit: R{int(p):,}".replace(",", " ") for p in price_steps]
 
-    # Plotly compatibility: text_auto may not exist in some versions
     try:
         fig = px.imshow(
             z_data,
@@ -356,7 +393,67 @@ def render_sensitivity(inputs: Dict[str, Any]) -> None:
         )
 
     fig.update_layout(title="Sensitivity Analysis: Residual Land Value")
-    st.plotly_chart(fig, width="stretch")
+    _plotly_show(fig)
+
+
+# =========================================================
+# AUDIT BUILD (GROUPED + ARROW-SAFE)
+# =========================================================
+
+LABELS: Dict[str, str] = {
+    "gross_bulk_m2": "Gross Bulk (m²)",
+    "sellable_area_m2": "Total Sellable (m²)",
+    "market_area_m2": "Market Area (m²)",
+    "affordable_area_m2": "Affordable Area (m²)",
+    "gdv": "Gross Development Value (GDV)",
+    "build_cost_base": "Base Construction Cost (pre-uplift)",
+    "wind_uplift_cost": "Wind/Exposure Uplift (proxy)",
+    "build_cost": "Total Construction Cost",
+    "contingency": "Contingency",
+    "escalation": "Escalation",
+    "professional_fees": "Professional Fees",
+    "rates_taxes": "Rates/Taxes",
+    "base_costs": "Subtotal: Base Costs",
+    "marketing": "Marketing & Sales",
+    "finance": "Finance Costs (Proxy)",
+    "total_costs_ex_profit": "Total Costs (excl. profit)",
+    "profit": "Target Profit",
+    "residual_land_value": "Residual Land Value",
+    "profit_on_cost": "Return on Cost (ROC)",
+}
+
+SECTIONS: List[Tuple[str, List[str]]] = [
+    ("Areas", ["gross_bulk_m2", "sellable_area_m2", "market_area_m2", "affordable_area_m2"]),
+    ("Revenue", ["gdv"]),
+    ("Costs", [
+        "build_cost_base", "wind_uplift_cost", "build_cost",
+        "contingency", "escalation", "professional_fees", "rates_taxes",
+        "base_costs", "marketing", "finance", "total_costs_ex_profit",
+    ]),
+    ("Profit", ["profit", "profit_on_cost"]),
+    ("Land", ["residual_land_value"]),
+]
+
+def _format_audit_value(key: str, val: Any) -> str:
+    if key in {"gross_bulk_m2", "sellable_area_m2", "market_area_m2", "affordable_area_m2"}:
+        return _fmt_area(val)
+    if key == "profit_on_cost":
+        return _fmt_pct(val, decimals=2)
+    if any(s in key for s in ["gdv", "cost", "value", "profit", "fees", "marketing", "finance", "taxes", "contingency", "escalation", "uplift"]):
+        return _money(val)
+    return str(val)
+
+def build_grouped_audit_rows(audit: Dict[str, Any]) -> pd.DataFrame:
+    rows: List[Dict[str, str]] = []
+    for section, keys in SECTIONS:
+        rows.append({"Item": f"— {section} —", "Value": ""})
+        for k in keys:
+            if k not in audit:
+                continue
+            label = LABELS.get(k, k.replace("_", " ").title())
+            rows.append({"Item": label, "Value": _format_audit_value(k, audit.get(k))})
+        rows.append({"Item": "", "Value": ""})
+    return pd.DataFrame(rows)
 
 
 # =========================================================
@@ -370,7 +467,6 @@ st.caption("Developer Feasibility Logic: GDV → Costs → Profit → Residual")
 with st.sidebar:
     st.header("Ops / Stability")
 
-    # Reset button helps after redeploys / stale session state
     if st.button("🔄 Reset session", key="reset_session"):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
@@ -538,50 +634,12 @@ with tab_audit:
         diff_df = _diff_dicts(audit, st.session_state.prev_audit)
         if not diff_df.empty:
             st.markdown("#### Changes Since Last Update")
-            st.dataframe(diff_df, width="stretch", hide_index=True)
+            _df_show(diff_df, hide_index=True)
             st.divider()
 
-    st.markdown("#### Detailed Audit Breakdown")
-
-    LABELS: Dict[str, str] = {
-        "gross_bulk_m2": "Gross Bulk (m²)",
-        "sellable_area_m2": "Total Sellable (m²)",
-        "market_area_m2": "Market Area (m²)",
-        "affordable_area_m2": "Affordable Area (m²)",
-        "gdv": "Gross Development Value (GDV)",
-        "build_cost_base": "Base Construction Cost (pre-uplift)",
-        "wind_uplift_cost": "Wind/Exposure Uplift (proxy)",
-        "build_cost": "Total Construction Cost",
-        "contingency": "Contingency",
-        "escalation": "Escalation",
-        "professional_fees": "Professional Fees",
-        "rates_taxes": "Rates/Taxes",
-        "marketing": "Marketing & Sales",
-        "finance": "Finance Costs (Proxy)",
-        "profit": "Target Profit",
-        "residual_land_value": "Residual Land Value",
-        "profit_on_cost": "Return on Cost (ROC)",
-    }
-
-    audit_rows = []
-    for k, v in audit.items():
-        if k == "inputs":
-            continue
-
-        label = LABELS.get(k, k.replace("_", " ").title())
-
-        if "area" in k or "bulk" in k:
-            val_str = f"{float(v):,.0f} m²".replace(",", " ")
-        elif "on_cost" in k:
-            val_str = f"{float(v)*100:.2f}%"
-        elif any(s in k for s in ["gdv", "cost", "value", "profit", "fees", "marketing", "finance", "taxes", "contingency", "escalation", "uplift"]):
-            val_str = _money(v)
-        else:
-            val_str = str(v)
-
-        audit_rows.append({"Item": label, "Value": val_str})
-
-    st.table(pd.DataFrame(audit_rows))
+    st.markdown("#### Detailed Audit Breakdown (Grouped)")
+    grouped = build_grouped_audit_rows(audit)
+    _df_show(grouped, hide_index=True)
 
     # Robust JSON download (stable key + stable bytes reduces media-missing spam)
     safe_audit_str = json.dumps(json.loads(json.dumps(audit, default=str)), indent=2)

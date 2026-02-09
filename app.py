@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 import json
 import hashlib
 
@@ -13,13 +13,17 @@ import numpy as np
 # =========================================================
 # STREAMLIT CONFIG
 # =========================================================
-
 st.set_page_config(page_title="IH RLV Calculator", layout="wide")
+
+# =========================================================
+# BOOT MARKER (helps diagnose import-time vs runtime crashes)
+# =========================================================
+st.write("✅ App booted")
+st.caption(f"streamlit={st.__version__} | pandas={pd.__version__} | numpy={np.__version__}")
 
 # =========================================================
 # HELPERS
 # =========================================================
-
 def _num(audit: Dict[str, Any], key: str, default: float = 0.0) -> float:
     v = audit.get(key, default)
     try:
@@ -35,22 +39,6 @@ def _money(x: Any) -> str:
         return f"R{str(x)}"
     s = f"{n:,.0f}".replace(",", " ")
     return f"R{s}"
-
-
-def _fmt_area(x: Any) -> str:
-    try:
-        n = float(x)
-    except Exception:
-        return str(x)
-    return f"{n:,.0f} m²".replace(",", " ")
-
-
-def _fmt_pct(x: Any, decimals: int = 2) -> str:
-    try:
-        n = float(x)
-    except Exception:
-        return str(x)
-    return f"{n*100:.{decimals}f}%"
 
 
 def _flatten(d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
@@ -81,6 +69,7 @@ def _diff_dicts(new: Dict[str, Any], old: Dict[str, Any]) -> pd.DataFrame:
 
 
 def _card(label: str, value_html: str, hint: str = "") -> None:
+    # Pure HTML card avoids any version-specific container args
     st.markdown(
         f"""
         <div style="border:1px solid rgba(255,255,255,0.15); border-radius:14px; padding:14px;">
@@ -103,36 +92,21 @@ def _hash_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()[:12]
 
 
-def _df_show(df: pd.DataFrame, *, hide_index: bool = True) -> None:
+def _df_show(df: pd.DataFrame, **kwargs) -> None:
     """
-    Streamlit-version-safe dataframe renderer.
-    Tries width="stretch" first (newer Streamlit), falls back to use_container_width=True.
-    """
-    try:
-        st.dataframe(df, width="stretch", hide_index=hide_index)
-    except TypeError:
-        try:
-            st.dataframe(df, use_container_width=True, hide_index=hide_index)
-        except TypeError:
-            # Older versions may not support hide_index
-            st.dataframe(df, use_container_width=True)
-
-
-def _plotly_show(fig) -> None:
-    """
-    Streamlit-version-safe plotly renderer.
-    Tries width="stretch" first (newer Streamlit), falls back to use_container_width=True.
+    Streamlit version-safe DataFrame renderer.
+    Uses st.dataframe but does NOT rely on newer args that can break deployments.
     """
     try:
-        st.plotly_chart(fig, width="stretch")
+        st.dataframe(df, **kwargs)
     except TypeError:
-        st.plotly_chart(fig, use_container_width=True)
+        # fallback for older versions if any kwargs unsupported
+        st.dataframe(df)
 
 
 # =========================================================
 # DEFAULT EXIT PRICE DATA (OPTIONAL)
 # =========================================================
-
 DEFAULT_EXIT_DATA = pd.DataFrame(
     [
         {
@@ -180,6 +154,7 @@ def load_exit_prices_from_upload(uploaded_file) -> pd.DataFrame:
     if "suburb" not in df.columns:
         raise ValueError("Exit prices CSV must include a 'suburb' column.")
 
+    # Fill missing optional columns
     defaults = {
         "exit_price_psm": np.nan,
         "recent_sales_psm": np.nan,
@@ -191,6 +166,7 @@ def load_exit_prices_from_upload(uploaded_file) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = default
 
+    # Coerce numerics
     for col in ["exit_price_psm", "recent_sales_psm", "wind_cost_uplift"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -210,7 +186,6 @@ def get_suburb_row(df: pd.DataFrame, suburb: str) -> Dict[str, Any]:
 # =========================================================
 # CORE FEASIBILITY ENGINE
 # =========================================================
-
 def compute_feasibility(
     plot_size_m2: float,
     floor_factor: float,
@@ -270,6 +245,7 @@ def compute_feasibility(
     total_project_cost = total_costs_ex_profit + residual_land_value
     profit_on_cost = (profit / total_project_cost) if total_project_cost > 0 else 0.0
 
+    # IMPORTANT: keep inputs serializable + stable
     inputs_for_sensitivity = dict(
         plot_size_m2=float(plot_size_m2),
         floor_factor=float(floor_factor),
@@ -316,7 +292,6 @@ def compute_feasibility(
 # =========================================================
 # VISUALS
 # =========================================================
-
 def render_waterfall(audit: Dict[str, Any]) -> None:
     gdv = _num(audit, "gdv")
     rlv = _num(audit, "residual_land_value")
@@ -355,7 +330,7 @@ def render_waterfall(audit: Dict[str, Any]) -> None:
         )
     )
     fig.update_layout(title="Residual Land Value Waterfall", height=500, margin=dict(t=50, b=20, l=10, r=10))
-    _plotly_show(fig)
+    st.plotly_chart(fig, width="stretch")
 
 
 def render_sensitivity(inputs: Dict[str, Any]) -> None:
@@ -374,6 +349,7 @@ def render_sensitivity(inputs: Dict[str, Any]) -> None:
     xlab = [f"Build: R{int(c):,}".replace(",", " ") for c in cost_steps]
     ylab = [f"Exit: R{int(p):,}".replace(",", " ") for p in price_steps]
 
+    # Plotly compatibility: text_auto may not exist in some versions
     try:
         fig = px.imshow(
             z_data,
@@ -393,266 +369,277 @@ def render_sensitivity(inputs: Dict[str, Any]) -> None:
         )
 
     fig.update_layout(title="Sensitivity Analysis: Residual Land Value")
-    _plotly_show(fig)
+    st.plotly_chart(fig, width="stretch")
 
 
 # =========================================================
-# AUDIT BUILD (GROUPED + ARROW-SAFE)
+# APP UI (wrapped in crash-catcher via main())
 # =========================================================
+def main() -> None:
+    st.title("🏗️ IH Residual Land Value Calculator")
+    st.caption("Developer Feasibility Logic: GDV → Costs → Profit → Residual")
 
-LABELS: Dict[str, str] = {
-    "gross_bulk_m2": "Gross Bulk (m²)",
-    "sellable_area_m2": "Total Sellable (m²)",
-    "market_area_m2": "Market Area (m²)",
-    "affordable_area_m2": "Affordable Area (m²)",
-    "gdv": "Gross Development Value (GDV)",
-    "build_cost_base": "Base Construction Cost (pre-uplift)",
-    "wind_uplift_cost": "Wind/Exposure Uplift (proxy)",
-    "build_cost": "Total Construction Cost",
-    "contingency": "Contingency",
-    "escalation": "Escalation",
-    "professional_fees": "Professional Fees",
-    "rates_taxes": "Rates/Taxes",
-    "base_costs": "Subtotal: Base Costs",
-    "marketing": "Marketing & Sales",
-    "finance": "Finance Costs (Proxy)",
-    "total_costs_ex_profit": "Total Costs (excl. profit)",
-    "profit": "Target Profit",
-    "residual_land_value": "Residual Land Value",
-    "profit_on_cost": "Return on Cost (ROC)",
-}
+    # ---- Sidebar: Ops controls ----
+    with st.sidebar:
+        st.header("Ops / Stability")
 
-SECTIONS: List[Tuple[str, List[str]]] = [
-    ("Areas", ["gross_bulk_m2", "sellable_area_m2", "market_area_m2", "affordable_area_m2"]),
-    ("Revenue", ["gdv"]),
-    ("Costs", [
-        "build_cost_base", "wind_uplift_cost", "build_cost",
-        "contingency", "escalation", "professional_fees", "rates_taxes",
-        "base_costs", "marketing", "finance", "total_costs_ex_profit",
-    ]),
-    ("Profit", ["profit", "profit_on_cost"]),
-    ("Land", ["residual_land_value"]),
-]
+        # Reset button helps after redeploys / stale session state
+        if st.button("🔄 Reset session", key="reset_session"):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
 
-def _format_audit_value(key: str, val: Any) -> str:
-    if key in {"gross_bulk_m2", "sellable_area_m2", "market_area_m2", "affordable_area_m2"}:
-        return _fmt_area(val)
-    if key == "profit_on_cost":
-        return _fmt_pct(val, decimals=2)
-    if any(s in key for s in ["gdv", "cost", "value", "profit", "fees", "marketing", "finance", "taxes", "contingency", "escalation", "uplift"]):
-        return _money(val)
-    return str(val)
+        st.divider()
 
-def build_grouped_audit_rows(audit: Dict[str, Any]) -> pd.DataFrame:
-    rows: List[Dict[str, str]] = []
-    for section, keys in SECTIONS:
-        rows.append({"Item": f"— {section} —", "Value": ""})
-        for k in keys:
-            if k not in audit:
+    # ---- Sidebar: data upload ----
+    with st.sidebar:
+        st.header("Data (2026 Exits)")
+        uploaded_exit = st.file_uploader("Upload Exit Prices CSV", type=["csv"], key="uploader_exit_prices")
+        st.caption(
+            "CSV columns: suburb, exit_price_psm, recent_sales_psm, "
+            "bulk_efficiency_note, coastal_premium_note, wind_cost_uplift"
+        )
+
+        try:
+            exit_df = load_exit_prices_from_upload(uploaded_exit)
+        except Exception as e:
+            st.error(str(e))
+            exit_df = DEFAULT_EXIT_DATA.copy()
+
+        st.divider()
+        st.header("Global Assumptions")
+        escalation_rate = st.slider("Escalation (% of build)", 0.0, 0.15, 0.03, key="esc_rate")
+        rates_taxes_rate = st.slider("Rates/Taxes (% of GDV)", 0.0, 0.10, 0.02, key="rates_tax_rate")
+
+    suburbs = sorted(exit_df["suburb"].astype(str).unique().tolist()) if (exit_df is not None and not exit_df.empty) else []
+
+    # ---- Property Quick-Profile ----
+    st.subheader("Property Quick-Profile")
+    c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.0, 1.0, 1.0])
+
+    with c1:
+        if suburbs:
+            suburb = st.selectbox("Suburb / Node", options=suburbs, index=0, key="suburb_select")
+        else:
+            suburb = ""
+            st.warning("No suburbs available (exit dataset empty). Upload a CSV or use the defaults.")
+        erf_ref = st.text_input("Erf / Address (reference)", value="", placeholder="e.g., Erf 12345, Sea Point", key="erf_ref")
+
+    with c2:
+        st.markdown("**City of Cape Town Map Viewer (workflow)**")
+        st.caption("Use the Map Viewer to confirm erf boundaries / area, then enter plot size below.")
+        map_query = st.text_input("Map Viewer search text", value="", placeholder="Paste erf number or address keywords", key="map_query")
+        if map_query.strip():
+            st.info("Tip: open the City Map Viewer and search for the same text to confirm plot extent/area.")
+
+    row = get_suburb_row(exit_df, suburb)
+    default_exit = float(row.get("exit_price_psm")) if row and pd.notna(row.get("exit_price_psm")) else 45000.0
+    default_recent = float(row.get("recent_sales_psm")) if row and pd.notna(row.get("recent_sales_psm")) else np.nan
+    default_wind_uplift = float(row.get("wind_cost_uplift") or 0.0) if row else 0.0
+
+    with c3:
+        plot_m2 = st.number_input("Plot size (m²)", value=1200, step=50, key="plot_m2")
+        far = st.number_input("Floor Factor (FAR)", value=2.5, step=0.1, key="far")
+
+    with c4:
+        eff = st.slider("Efficiency (Sellable/Bulk)", 0.50, 1.00, 0.85, key="eff")
+        exit_p = st.number_input("Market Price (R/m² sellable)", value=int(default_exit), step=500, key="exit_p")
+
+    with c5:
+        build_p = st.number_input("Build Cost (R/m² bulk)", value=18500, step=500, key="build_p")
+        wind_uplift = st.slider(
+            "Coastal/Wind cost uplift",
+            0.0,
+            0.10,
+            float(default_wind_uplift),
+            help="Proxy uplift applied to build cost (e.g., glazing / exposure).",
+            key="wind_uplift",
+        )
+
+    st.divider()
+
+    # ---- The Feasibility Lens ----
+    st.subheader("The Feasibility Lens")
+    card1, card2, card3 = st.columns(3)
+
+    local_comps_html = (
+        f"Recent sales in this sub-zone: <b>{_money(default_recent)}/m²</b>."
+        if pd.notna(default_recent)
+        else "Recent sales in this sub-zone: <i>(upload CSV to populate comps)</i>."
+    )
+
+    bulk_eff_note = (row.get("bulk_efficiency_note") or "").strip() if row else ""
+    if not bulk_eff_note:
+        bulk_eff_note = "Bulk efficiency note: <i>(upload CSV to add a suburb-specific rule-of-thumb)</i>."
+
+    coastal_note = (row.get("coastal_premium_note") or "").strip() if row else ""
+    if not coastal_note:
+        coastal_note = "Coastal premium: <i>(upload CSV to add a suburb-specific note)</i>."
+
+    with card1:
+        _card("📍 Local Comps", local_comps_html, hint="Use as a sense-check for your market exit assumption.")
+
+    with card2:
+        approx_bulk = float(plot_m2) * float(far)
+        _card(
+            "🏗️ Bulk Efficiency",
+            f"You can build ~<b>{approx_bulk:,.0f} m²</b> gross bulk at FAR <b>{float(far):.2f}</b>.<br/><br/>{bulk_eff_note}",
+            hint="Bulk is a zoning proxy; confirm with scheme + overlays + parking + setbacks.",
+        )
+
+    with card3:
+        _card(
+            "💨 Coastal Premium / Exposure",
+            f"High-wind/exposure proxy: <b>+{float(wind_uplift)*100:.1f}%</b> to build cost.<br/><br/>{coastal_note}",
+            hint="Proxy only — replace with QS line items when available.",
+        )
+
+    st.divider()
+
+    # ---- Sidebar: feasibility inputs ----
+    with st.sidebar:
+        st.header("1. Inclusionary Housing")
+        inc_on = st.checkbox("Apply IH Policy", value=True, key="inc_on")
+        inc_share = st.slider("Affordable Share (% of Sellable)", 0.0, 0.4, 0.10, key="inc_share")
+        inc_p = st.number_input("Affordable Exit (R/m²)", value=12000, step=500, key="inc_p")
+
+        st.header("2. Costs & Profit")
+        profit_t = st.slider("Target Profit (% of GDV)", 0.0, 0.3, 0.15, key="profit_t")
+        fin_r = st.slider("Finance Proxy (% of costs)", 0.0, 0.25, 0.10, key="fin_r")
+        mkt_r = st.slider("Marketing (% of GDV)", 0.0, 0.10, 0.03, key="mkt_r")
+        fees_r = st.slider("Prof Fees (% of build)", 0.0, 0.25, 0.10, key="fees_r")
+        cont_r = st.slider("Contingency (% of build)", 0.0, 0.15, 0.05, key="cont_r")
+
+    # ---- Compute ----
+    audit = compute_feasibility(
+        plot_size_m2=float(plot_m2),
+        floor_factor=float(far),
+        efficiency=float(eff),
+        exit_price_psm=float(exit_p),
+        build_cost_psm=float(build_p),
+        include_affordable=bool(inc_on),
+        affordable_share=float(inc_share),
+        affordable_price_psm=float(inc_p),
+        contingency_rate=float(cont_r),
+        escalation_rate=float(escalation_rate),
+        prof_fees_rate=float(fees_r),
+        rates_taxes_rate=float(rates_taxes_rate),
+        marketing_rate=float(mkt_r),
+        finance_rate=float(fin_r),
+        profit_rate=float(profit_t),
+        wind_cost_uplift=float(wind_uplift),
+    )
+
+    # ---- Top metrics ----
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("GDV", _money(audit["gdv"]))
+    m2.metric("Residual Land Value", _money(audit["residual_land_value"]))
+    m3.metric("Profit Target", _money(audit["profit"]))
+    m4.metric("Profit on Cost (ROC)", f"{audit['profit_on_cost']*100:.1f}%")
+
+    st.divider()
+
+    # ---- Tabs ----
+    tab_main, tab_sens, tab_audit = st.tabs(["📊 Main Feasibility", "📉 Sensitivity", "🧾 Audit Trail"])
+
+    with tab_main:
+        render_waterfall(audit)
+
+    with tab_sens:
+        st.subheader("Land Value Sensitivity")
+        st.info("RLV response if Market Exit or Build Costs vary by +/- 10% (other assumptions held constant).")
+        render_sensitivity(audit["inputs"])
+
+    with tab_audit:
+        # Diff vs previous audit
+        if "prev_audit" in st.session_state:
+            diff_df = _diff_dicts(audit, st.session_state.prev_audit)
+            if not diff_df.empty:
+                st.markdown("#### Changes Since Last Update")
+                _df_show(diff_df, use_container_width=True, hide_index=True)
+                st.divider()
+
+        st.markdown("#### Detailed Audit Breakdown")
+
+        LABELS: Dict[str, str] = {
+            "gross_bulk_m2": "Gross Bulk (m²)",
+            "sellable_area_m2": "Total Sellable (m²)",
+            "market_area_m2": "Market Area (m²)",
+            "affordable_area_m2": "Affordable Area (m²)",
+            "gdv": "Gross Development Value (GDV)",
+            "build_cost_base": "Base Construction Cost (pre-uplift)",
+            "wind_uplift_cost": "Wind/Exposure Uplift (proxy)",
+            "build_cost": "Total Construction Cost",
+            "contingency": "Contingency",
+            "escalation": "Escalation",
+            "professional_fees": "Professional Fees",
+            "rates_taxes": "Rates/Taxes",
+            "marketing": "Marketing & Sales",
+            "finance": "Finance Costs (Proxy)",
+            "profit": "Target Profit",
+            "residual_land_value": "Residual Land Value",
+            "profit_on_cost": "Return on Cost (ROC)",
+        }
+
+        audit_rows = []
+        for k, v in audit.items():
+            if k == "inputs":
                 continue
+
             label = LABELS.get(k, k.replace("_", " ").title())
-            rows.append({"Item": label, "Value": _format_audit_value(k, audit.get(k))})
-        rows.append({"Item": "", "Value": ""})
-    return pd.DataFrame(rows)
+
+            if "area" in k or "bulk" in k:
+                val_str = f"{float(v):,.0f} m²".replace(",", " ")
+            elif "on_cost" in k:
+                val_str = f"{float(v)*100:.2f}%"
+            elif any(
+                s in k
+                for s in [
+                    "gdv",
+                    "cost",
+                    "value",
+                    "profit",
+                    "fees",
+                    "marketing",
+                    "finance",
+                    "taxes",
+                    "contingency",
+                    "escalation",
+                    "uplift",
+                ]
+            ):
+                val_str = _money(v)
+            else:
+                val_str = str(v)
+
+            audit_rows.append({"Item": label, "Value": val_str})
+
+        # Use dataframe instead of table for better robustness
+        _df_show(pd.DataFrame(audit_rows), use_container_width=True, hide_index=True)
+
+        # Robust JSON download (stable key + stable bytes reduces media-missing spam)
+        safe_audit_str = json.dumps(json.loads(json.dumps(audit, default=str)), indent=2)
+        safe_audit_bytes = _stable_bytes(safe_audit_str)
+        audit_sig = _hash_bytes(safe_audit_bytes)
+
+        st.download_button(
+            "Download Full Audit (JSON)",
+            data=safe_audit_bytes,
+            file_name="feasibility_audit.json",
+            mime="application/json",
+            key=f"dl_audit_json_{audit_sig}",
+        )
+
+    # Save current audit for next run diff
+    st.session_state.prev_audit = audit
 
 
 # =========================================================
-# APP UI
+# CRASH CATCHER (forces error to display in UI + logs)
 # =========================================================
-
-st.title("🏗️ IH Residual Land Value Calculator")
-st.caption("Developer Feasibility Logic: GDV → Costs → Profit → Residual")
-
-# ---- Sidebar: Ops controls ----
-with st.sidebar:
-    st.header("Ops / Stability")
-
-    if st.button("🔄 Reset session", key="reset_session"):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.rerun()
-
-    st.divider()
-
-# ---- Sidebar: data upload ----
-with st.sidebar:
-    st.header("Data (2026 Exits)")
-    uploaded_exit = st.file_uploader("Upload Exit Prices CSV", type=["csv"], key="uploader_exit_prices")
-    st.caption("CSV columns: suburb, exit_price_psm, recent_sales_psm, bulk_efficiency_note, coastal_premium_note, wind_cost_uplift")
-
-    try:
-        exit_df = load_exit_prices_from_upload(uploaded_exit)
-    except Exception as e:
-        st.error(str(e))
-        exit_df = DEFAULT_EXIT_DATA.copy()
-
-    st.divider()
-    st.header("Global Assumptions")
-    escalation_rate = st.slider("Escalation (% of build)", 0.0, 0.15, 0.03, key="esc_rate")
-    rates_taxes_rate = st.slider("Rates/Taxes (% of GDV)", 0.0, 0.10, 0.02, key="rates_tax_rate")
-
-suburbs = sorted(exit_df["suburb"].astype(str).unique().tolist()) if (exit_df is not None and not exit_df.empty) else []
-
-# ---- Property Quick-Profile ----
-st.subheader("Property Quick-Profile")
-c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.0, 1.0, 1.0])
-
-with c1:
-    if suburbs:
-        suburb = st.selectbox("Suburb / Node", options=suburbs, index=0, key="suburb_select")
-    else:
-        suburb = ""
-        st.warning("No suburbs available (exit dataset empty). Upload a CSV or use the defaults.")
-    erf_ref = st.text_input("Erf / Address (reference)", value="", placeholder="e.g., Erf 12345, Sea Point", key="erf_ref")
-
-with c2:
-    st.markdown("**City of Cape Town Map Viewer (workflow)**")
-    st.caption("Use the Map Viewer to confirm erf boundaries / area, then enter plot size below.")
-    map_query = st.text_input("Map Viewer search text", value="", placeholder="Paste erf number or address keywords", key="map_query")
-    if map_query.strip():
-        st.info("Tip: open the City Map Viewer and search for the same text to confirm plot extent/area.")
-
-row = get_suburb_row(exit_df, suburb)
-default_exit = float(row.get("exit_price_psm")) if row and pd.notna(row.get("exit_price_psm")) else 45000.0
-default_recent = float(row.get("recent_sales_psm")) if row and pd.notna(row.get("recent_sales_psm")) else np.nan
-default_wind_uplift = float(row.get("wind_cost_uplift") or 0.0) if row else 0.0
-
-with c3:
-    plot_m2 = st.number_input("Plot size (m²)", value=1200, step=50, key="plot_m2")
-    far = st.number_input("Floor Factor (FAR)", value=2.5, step=0.1, key="far")
-
-with c4:
-    eff = st.slider("Efficiency (Sellable/Bulk)", 0.50, 1.00, 0.85, key="eff")
-    exit_p = st.number_input("Market Price (R/m² sellable)", value=int(default_exit), step=500, key="exit_p")
-
-with c5:
-    build_p = st.number_input("Build Cost (R/m² bulk)", value=18500, step=500, key="build_p")
-    wind_uplift = st.slider(
-        "Coastal/Wind cost uplift",
-        0.0, 0.10, float(default_wind_uplift),
-        help="Proxy uplift applied to build cost (e.g., glazing / exposure).",
-        key="wind_uplift",
-    )
-
-st.divider()
-
-# ---- The Feasibility Lens ----
-st.subheader("The Feasibility Lens")
-card1, card2, card3 = st.columns(3)
-
-local_comps_html = (
-    f"Recent sales in this sub-zone: <b>{_money(default_recent)}/m²</b>."
-    if pd.notna(default_recent)
-    else "Recent sales in this sub-zone: <i>(upload CSV to populate comps)</i>."
-)
-
-bulk_eff_note = (row.get("bulk_efficiency_note") or "").strip() if row else ""
-if not bulk_eff_note:
-    bulk_eff_note = "Bulk efficiency note: <i>(upload CSV to add a suburb-specific rule-of-thumb)</i>."
-
-coastal_note = (row.get("coastal_premium_note") or "").strip() if row else ""
-if not coastal_note:
-    coastal_note = "Coastal premium: <i>(upload CSV to add a suburb-specific note)</i>."
-
-with card1:
-    _card("📍 Local Comps", local_comps_html, hint="Use as a sense-check for your market exit assumption.")
-
-with card2:
-    approx_bulk = float(plot_m2) * float(far)
-    _card(
-        "🏗️ Bulk Efficiency",
-        f"You can build ~<b>{approx_bulk:,.0f} m²</b> gross bulk at FAR <b>{float(far):.2f}</b>.<br/><br/>{bulk_eff_note}",
-        hint="Bulk is a zoning proxy; confirm with scheme + overlays + parking + setbacks.",
-    )
-
-with card3:
-    _card(
-        "💨 Coastal Premium / Exposure",
-        f"High-wind/exposure proxy: <b>+{float(wind_uplift)*100:.1f}%</b> to build cost.<br/><br/>{coastal_note}",
-        hint="Proxy only — replace with QS line items when available.",
-    )
-
-st.divider()
-
-# ---- Sidebar: feasibility inputs ----
-with st.sidebar:
-    st.header("1. Inclusionary Housing")
-    inc_on = st.checkbox("Apply IH Policy", value=True, key="inc_on")
-    inc_share = st.slider("Affordable Share (% of Sellable)", 0.0, 0.4, 0.10, key="inc_share")
-    inc_p = st.number_input("Affordable Exit (R/m²)", value=12000, step=500, key="inc_p")
-
-    st.header("2. Costs & Profit")
-    profit_t = st.slider("Target Profit (% of GDV)", 0.0, 0.3, 0.15, key="profit_t")
-    fin_r = st.slider("Finance Proxy (% of costs)", 0.0, 0.25, 0.10, key="fin_r")
-    mkt_r = st.slider("Marketing (% of GDV)", 0.0, 0.10, 0.03, key="mkt_r")
-    fees_r = st.slider("Prof Fees (% of build)", 0.0, 0.25, 0.10, key="fees_r")
-    cont_r = st.slider("Contingency (% of build)", 0.0, 0.15, 0.05, key="cont_r")
-
-# ---- Compute ----
-audit = compute_feasibility(
-    plot_size_m2=float(plot_m2),
-    floor_factor=float(far),
-    efficiency=float(eff),
-    exit_price_psm=float(exit_p),
-    build_cost_psm=float(build_p),
-    include_affordable=bool(inc_on),
-    affordable_share=float(inc_share),
-    affordable_price_psm=float(inc_p),
-    contingency_rate=float(cont_r),
-    escalation_rate=float(escalation_rate),
-    prof_fees_rate=float(fees_r),
-    rates_taxes_rate=float(rates_taxes_rate),
-    marketing_rate=float(mkt_r),
-    finance_rate=float(fin_r),
-    profit_rate=float(profit_t),
-    wind_cost_uplift=float(wind_uplift),
-)
-
-# ---- Top metrics ----
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("GDV", _money(audit["gdv"]))
-m2.metric("Residual Land Value", _money(audit["residual_land_value"]))
-m3.metric("Profit Target", _money(audit["profit"]))
-m4.metric("Profit on Cost (ROC)", f"{audit['profit_on_cost']*100:.1f}%")
-
-st.divider()
-
-# ---- Tabs ----
-tab_main, tab_sens, tab_audit = st.tabs(["📊 Main Feasibility", "📉 Sensitivity", "🧾 Audit Trail"])
-
-with tab_main:
-    render_waterfall(audit)
-
-with tab_sens:
-    st.subheader("Land Value Sensitivity")
-    st.info("RLV response if Market Exit or Build Costs vary by +/- 10% (other assumptions held constant).")
-    render_sensitivity(audit["inputs"])
-
-with tab_audit:
-    # Diff vs previous audit
-    if "prev_audit" in st.session_state:
-        diff_df = _diff_dicts(audit, st.session_state.prev_audit)
-        if not diff_df.empty:
-            st.markdown("#### Changes Since Last Update")
-            _df_show(diff_df, hide_index=True)
-            st.divider()
-
-    st.markdown("#### Detailed Audit Breakdown (Grouped)")
-    grouped = build_grouped_audit_rows(audit)
-    _df_show(grouped, hide_index=True)
-
-    # Robust JSON download (stable key + stable bytes reduces media-missing spam)
-    safe_audit_str = json.dumps(json.loads(json.dumps(audit, default=str)), indent=2)
-    safe_audit_bytes = _stable_bytes(safe_audit_str)
-    audit_sig = _hash_bytes(safe_audit_bytes)
-
-    st.download_button(
-        "Download Full Audit (JSON)",
-        data=safe_audit_bytes,
-        file_name="feasibility_audit.json",
-        mime="application/json",
-        key=f"dl_audit_json_{audit_sig}",
-    )
-
-# Save current audit for next run diff
-st.session_state.prev_audit = audit
+try:
+    main()
+except Exception as e:
+    st.error("App crashed — full traceback below.")
+    st.exception(e)
+    raise

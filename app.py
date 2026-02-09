@@ -2,14 +2,19 @@ from __future__ import annotations
 
 from typing import Any, Dict
 import json
-import pandas as pd
-
+import hashlib
 
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 import numpy as np
+
+# =========================================================
+# STREAMLIT CONFIG
+# =========================================================
+
+st.set_page_config(page_title="IH RLV Calculator", layout="wide")
 
 # =========================================================
 # HELPERS
@@ -23,7 +28,7 @@ def _num(audit: Dict[str, Any], key: str, default: float = 0.0) -> float:
         return default
 
 
-def _money(x: float) -> str:
+def _money(x: Any) -> str:
     try:
         n = float(x)
     except Exception:
@@ -60,7 +65,7 @@ def _diff_dicts(new: Dict[str, Any], old: Dict[str, Any]) -> pd.DataFrame:
 
 
 def _card(label: str, value_html: str, hint: str = "") -> None:
-    # Avoid st.container(border=True) incompatibility by using HTML
+    # Pure HTML card avoids any version-specific container args
     st.markdown(
         f"""
         <div style="border:1px solid rgba(255,255,255,0.15); border-radius:14px; padding:14px;">
@@ -73,8 +78,18 @@ def _card(label: str, value_html: str, hint: str = "") -> None:
     )
 
 
+def _stable_bytes(data: str | bytes) -> bytes:
+    if isinstance(data, bytes):
+        return data
+    return data.encode("utf-8")
+
+
+def _hash_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()[:12]
+
+
 # =========================================================
-# 2026 EXIT PRICE DATA (OPTIONAL)
+# DEFAULT EXIT PRICE DATA (OPTIONAL)
 # =========================================================
 
 DEFAULT_EXIT_DATA = pd.DataFrame(
@@ -108,7 +123,13 @@ DEFAULT_EXIT_DATA = pd.DataFrame(
 
 
 @st.cache_data(show_spinner=False)
-def load_exit_prices(uploaded_file) -> pd.DataFrame:
+def load_exit_prices_from_upload(uploaded_file) -> pd.DataFrame:
+    """
+    Deployment-safe CSV loader:
+    - Accepts missing columns
+    - Coerces types
+    - Never throws unless suburb missing
+    """
     if uploaded_file is None:
         return DEFAULT_EXIT_DATA.copy()
 
@@ -118,16 +139,19 @@ def load_exit_prices(uploaded_file) -> pd.DataFrame:
     if "suburb" not in df.columns:
         raise ValueError("Exit prices CSV must include a 'suburb' column.")
 
-    for col, default in [
-        ("exit_price_psm", np.nan),
-        ("recent_sales_psm", np.nan),
-        ("bulk_efficiency_note", ""),
-        ("coastal_premium_note", ""),
-        ("wind_cost_uplift", 0.0),
-    ]:
+    # Fill missing optional columns
+    defaults = {
+        "exit_price_psm": np.nan,
+        "recent_sales_psm": np.nan,
+        "bulk_efficiency_note": "",
+        "coastal_premium_note": "",
+        "wind_cost_uplift": 0.0,
+    }
+    for col, default in defaults.items():
         if col not in df.columns:
             df[col] = default
 
+    # Coerce numerics
     for col in ["exit_price_psm", "recent_sales_psm", "wind_cost_uplift"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -166,9 +190,11 @@ def compute_feasibility(
     profit_rate: float,
     wind_cost_uplift: float = 0.0,
 ) -> Dict[str, Any]:
+    # 1) Areas
     gross_bulk_m2 = plot_size_m2 * floor_factor
     sellable_area_m2 = gross_bulk_m2 * efficiency
 
+    # 2) Revenue
     if include_affordable and affordable_share > 0:
         affordable_area_m2 = sellable_area_m2 * affordable_share
         market_area_m2 = sellable_area_m2 - affordable_area_m2
@@ -178,6 +204,7 @@ def compute_feasibility(
         market_area_m2 = sellable_area_m2
         gdv = sellable_area_m2 * exit_price_psm
 
+    # 3) Direct Costs
     build_cost_base = gross_bulk_m2 * build_cost_psm
     wind_uplift_cost = build_cost_base * max(0.0, float(wind_cost_uplift or 0.0))
     build_cost = build_cost_base + wind_uplift_cost
@@ -189,34 +216,39 @@ def compute_feasibility(
 
     base_costs = build_cost + contingency + escalation + professional_fees + rates_taxes
 
+    # 4) Indirect
     marketing = gdv * marketing_rate
     finance = (base_costs + marketing) * finance_rate
     total_costs_ex_profit = base_costs + marketing + finance
 
+    # 5) Profit
     profit = gdv * profit_rate
 
+    # 6) RLV
     residual_land_value = gdv - total_costs_ex_profit - profit
 
+    # 7) ROC
     total_project_cost = total_costs_ex_profit + residual_land_value
     profit_on_cost = (profit / total_project_cost) if total_project_cost > 0 else 0.0
 
+    # IMPORTANT: keep inputs serializable + stable
     inputs_for_sensitivity = dict(
-        plot_size_m2=plot_size_m2,
-        floor_factor=floor_factor,
-        efficiency=efficiency,
-        exit_price_psm=exit_price_psm,
-        build_cost_psm=build_cost_psm,
-        include_affordable=include_affordable,
-        affordable_share=affordable_share,
-        affordable_price_psm=affordable_price_psm,
-        contingency_rate=contingency_rate,
-        escalation_rate=escalation_rate,
-        prof_fees_rate=prof_fees_rate,
-        rates_taxes_rate=rates_taxes_rate,
-        marketing_rate=marketing_rate,
-        finance_rate=finance_rate,
-        profit_rate=profit_rate,
-        wind_cost_uplift=wind_cost_uplift,
+        plot_size_m2=float(plot_size_m2),
+        floor_factor=float(floor_factor),
+        efficiency=float(efficiency),
+        exit_price_psm=float(exit_price_psm),
+        build_cost_psm=float(build_cost_psm),
+        include_affordable=bool(include_affordable),
+        affordable_share=float(affordable_share),
+        affordable_price_psm=float(affordable_price_psm),
+        contingency_rate=float(contingency_rate),
+        escalation_rate=float(escalation_rate),
+        prof_fees_rate=float(prof_fees_rate),
+        rates_taxes_rate=float(rates_taxes_rate),
+        marketing_rate=float(marketing_rate),
+        finance_rate=float(finance_rate),
+        profit_rate=float(profit_rate),
+        wind_cost_uplift=float(wind_cost_uplift),
     )
 
     return {
@@ -244,7 +276,7 @@ def compute_feasibility(
 
 
 # =========================================================
-# VISUALIZATIONS
+# VISUALS
 # =========================================================
 
 def render_waterfall(audit: Dict[str, Any]) -> None:
@@ -268,9 +300,9 @@ def render_waterfall(audit: Dict[str, Any]) -> None:
         ("Target Profit", profit),
     ]
 
-    labels = ["GDV"] + [item[0] for item in items] + ["Residual Land Value"]
+    labels = ["GDV"] + [i[0] for i in items] + ["Residual Land Value"]
     measures = ["absolute"] + ["relative"] * len(items) + ["total"]
-    values = [gdv] + [-item[1] for item in items] + [rlv]
+    values = [gdv] + [-i[1] for i in items] + [rlv]
 
     fig = go.Figure(
         go.Waterfall(
@@ -296,14 +328,15 @@ def render_sensitivity(inputs: Dict[str, Any]) -> None:
     for p in price_steps:
         row = []
         for c in cost_steps:
-            sim_inputs = {**inputs, "exit_price_psm": float(p), "build_cost_psm": float(c)}
-            res = compute_feasibility(**sim_inputs)
+            sim = {**inputs, "exit_price_psm": float(p), "build_cost_psm": float(c)}
+            res = compute_feasibility(**sim)
             row.append(res["residual_land_value"])
         z_data.append(row)
 
     xlab = [f"Build: R{int(c):,}".replace(",", " ") for c in cost_steps]
     ylab = [f"Exit: R{int(p):,}".replace(",", " ") for p in price_steps]
 
+    # Plotly compatibility: text_auto may not exist in some versions
     try:
         fig = px.imshow(
             z_data,
@@ -327,35 +360,44 @@ def render_sensitivity(inputs: Dict[str, Any]) -> None:
 
 
 # =========================================================
-# STREAMLIT UI
+# APP UI
 # =========================================================
-
-st.set_page_config(page_title="IH RLV Calculator", layout="wide")
 
 st.title("🏗️ IH Residual Land Value Calculator")
 st.caption("Developer Feasibility Logic: GDV → Costs → Profit → Residual")
 
-# ---------------- Sidebar: Data + Global Assumptions ----------------
+# ---- Sidebar: Ops controls ----
+with st.sidebar:
+    st.header("Ops / Stability")
+
+    # Reset button helps after redeploys / stale session state
+    if st.button("🔄 Reset session", key="reset_session"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
+
+    st.divider()
+
+# ---- Sidebar: data upload ----
 with st.sidebar:
     st.header("Data (2026 Exits)")
     uploaded_exit = st.file_uploader("Upload Exit Prices CSV", type=["csv"], key="uploader_exit_prices")
     st.caption("CSV columns: suburb, exit_price_psm, recent_sales_psm, bulk_efficiency_note, coastal_premium_note, wind_cost_uplift")
 
     try:
-        exit_df = load_exit_prices(uploaded_exit)
+        exit_df = load_exit_prices_from_upload(uploaded_exit)
     except Exception as e:
         st.error(str(e))
         exit_df = DEFAULT_EXIT_DATA.copy()
 
     st.divider()
-    st.header("Assumptions")
+    st.header("Global Assumptions")
     escalation_rate = st.slider("Escalation (% of build)", 0.0, 0.15, 0.03, key="esc_rate")
     rates_taxes_rate = st.slider("Rates/Taxes (% of GDV)", 0.0, 0.10, 0.02, key="rates_tax_rate")
 
-# Safe suburbs list handling
 suburbs = sorted(exit_df["suburb"].astype(str).unique().tolist()) if (exit_df is not None and not exit_df.empty) else []
 
-# ---------------- Property Quick-Profile ----------------
+# ---- Property Quick-Profile ----
 st.subheader("Property Quick-Profile")
 c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.0, 1.0, 1.0])
 
@@ -398,7 +440,7 @@ with c5:
 
 st.divider()
 
-# ---------------- The Feasibility Lens ----------------
+# ---- The Feasibility Lens ----
 st.subheader("The Feasibility Lens")
 card1, card2, card3 = st.columns(3)
 
@@ -436,7 +478,7 @@ with card3:
 
 st.divider()
 
-# ---------------- Sidebar: Feasibility Inputs ----------------
+# ---- Sidebar: feasibility inputs ----
 with st.sidebar:
     st.header("1. Inclusionary Housing")
     inc_on = st.checkbox("Apply IH Policy", value=True, key="inc_on")
@@ -450,7 +492,7 @@ with st.sidebar:
     fees_r = st.slider("Prof Fees (% of build)", 0.0, 0.25, 0.10, key="fees_r")
     cont_r = st.slider("Contingency (% of build)", 0.0, 0.15, 0.05, key="cont_r")
 
-# ---------------- Compute ----------------
+# ---- Compute ----
 audit = compute_feasibility(
     plot_size_m2=float(plot_m2),
     floor_factor=float(far),
@@ -470,7 +512,7 @@ audit = compute_feasibility(
     wind_cost_uplift=float(wind_uplift),
 )
 
-# ---------------- Top Metrics ----------------
+# ---- Top metrics ----
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("GDV", _money(audit["gdv"]))
 m2.metric("Residual Land Value", _money(audit["residual_land_value"]))
@@ -479,7 +521,7 @@ m4.metric("Profit on Cost (ROC)", f"{audit['profit_on_cost']*100:.1f}%")
 
 st.divider()
 
-# ---------------- Tabs ----------------
+# ---- Tabs ----
 tab_main, tab_sens, tab_audit = st.tabs(["📊 Main Feasibility", "📉 Sensitivity", "🧾 Audit Trail"])
 
 with tab_main:
@@ -491,6 +533,7 @@ with tab_sens:
     render_sensitivity(audit["inputs"])
 
 with tab_audit:
+    # Diff vs previous audit
     if "prev_audit" in st.session_state:
         diff_df = _diff_dicts(audit, st.session_state.prev_audit)
         if not diff_df.empty:
@@ -540,17 +583,18 @@ with tab_audit:
 
     st.table(pd.DataFrame(audit_rows))
 
-    # Robust JSON download (prevents MediaFileHandler noise)
-    safe_audit = json.dumps(json.loads(json.dumps(audit, default=str)), indent=2)
+    # Robust JSON download (stable key + stable bytes reduces media-missing spam)
+    safe_audit_str = json.dumps(json.loads(json.dumps(audit, default=str)), indent=2)
+    safe_audit_bytes = _stable_bytes(safe_audit_str)
+    audit_sig = _hash_bytes(safe_audit_bytes)
 
     st.download_button(
         "Download Full Audit (JSON)",
-        data=safe_audit,
+        data=safe_audit_bytes,
         file_name="feasibility_audit.json",
         mime="application/json",
-        key="dl_audit_json",
+        key=f"dl_audit_json_{audit_sig}",
     )
 
 # Save current audit for next run diff
 st.session_state.prev_audit = audit
-```

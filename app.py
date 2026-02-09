@@ -1,9 +1,19 @@
-from typing import Dict, Any
+from __future__ import annotations
 
 from typing import Dict, Any, Optional
 import json
 import pandas as pd
 import streamlit as st
+
+
+def _money(x: float) -> str:
+    """Format money as South African Rand with spaced thousands (e.g. R1 234 567)."""
+    try:
+        n = float(x)
+    except Exception:
+        return f"R{str(x)}"
+    s = f"{n:,.0f}".replace(",", " ")
+    return f"R{s}"
 
 
 def _flatten(d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
@@ -39,26 +49,32 @@ def render_audit(
     previous_audit: Optional[Dict[str, Any]] = None,
     show_raw_json: bool = True,
 ) -> None:
-    # Guard
     if not audit:
         st.info("No audit data available for this run.")
         return
 
+    money_key_set = {
+        "gdv", "build_cost", "contingency", "escalation", "professional_fees", "rates_taxes",
+        "base_costs", "marketing", "finance", "finance_marketing", "total_costs_ex_profit",
+        "profit_base", "profit", "residual_land_value", "acquisition_costs",
+    }
+
+    area_unit_key_set = {
+        "gross_bulk_m2", "sellable_area_m2", "market_area_m2", "affordable_area_m2", "units_estimate"
+    }
+
+    money_count = sum(1 for k in audit.keys() if k in money_key_set)
+    area_count = sum(1 for k in audit.keys() if k in area_unit_key_set)
+    other_count = max(0, len(audit) - money_count - area_count)
+
     with st.expander(title, expanded=expanded):
         st.markdown("#### Summary")
 
-        # --- Quick stats (counts only; safe even if some keys missing) ---
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Fields", len(audit))
-        col2.metric("Money items", sum(1 for k in audit.keys() if k in {
-            "gdv","build_cost","contingency","escalation","professional_fees","rates_taxes",
-            "base_costs","marketing","finance","finance_marketing","total_costs_ex_profit",
-            "profit_base","profit","residual_land_value","acquisition_costs"
-        }))
-        col3.metric("Areas / Units", sum(1 for k in audit.keys() if k in {
-            "gross_bulk_m2","sellable_area_m2","market_area_m2","affordable_area_m2","units_estimate"
-        }))
-        col4.metric("Other", max(0, len(audit) - col2._value - col3._value) if hasattr(col2, "_value") else 0)
+        col2.metric("Money items", money_count)
+        col3.metric("Areas / Units", area_count)
+        col4.metric("Other", other_count)
 
         st.divider()
 
@@ -95,16 +111,13 @@ def render_audit(
         st.divider()
         st.markdown("#### Audit Table")
 
-        # --- Human-friendly labels (extend anytime) ---
         LABELS: Dict[str, str] = {
             "gross_bulk_m2": "Gross bulk (m²)",
             "sellable_area_m2": "Sellable area (m²)",
             "units_estimate": "Units (estimate)",
             "market_area_m2": "Market area (m²)",
             "affordable_area_m2": "Affordable area (m²)",
-
             "gdv": "GDV (total revenue)",
-
             "build_cost_psm_effective": "Build cost (effective) (R/m² bulk)",
             "cost_uplift_factor": "Cost uplift factor",
             "affordable_cost_multiplier": "Affordable cost multiplier",
@@ -118,22 +131,13 @@ def render_audit(
             "finance": "Finance (proxy)",
             "finance_marketing": "Legacy finance + marketing",
             "total_costs_ex_profit": "Total costs (ex profit)",
-
             "profit_basis": "Profit basis",
             "profit_base": "Profit base",
             "profit": "Profit",
-
             "residual_land_value": "Residual land value (pre acquisition)",
             "acquisition_costs": "Acquisition costs",
         }
 
-        # --- Formatting buckets ---
-        money_keys = {
-            "gdv", "build_cost", "contingency", "escalation", "professional_fees",
-            "rates_taxes", "base_costs", "marketing", "finance", "finance_marketing",
-            "total_costs_ex_profit", "profit_base", "profit", "residual_land_value",
-            "acquisition_costs",
-        }
         factor_keys = {"cost_uplift_factor", "affordable_cost_multiplier"}
         area_keys = {"gross_bulk_m2", "sellable_area_m2", "market_area_m2", "affordable_area_m2"}
         rands_per_sqm_keys = {"build_cost_psm_effective"}
@@ -165,8 +169,7 @@ def render_audit(
             except Exception:
                 return str(v)
 
-            # NOTE: _money must exist elsewhere in your app
-            if k in money_keys:
+            if k in money_key_set:
                 return _money(n)
 
             if k in rands_per_sqm_keys:
@@ -190,30 +193,13 @@ def render_audit(
                 return fmt_float(n, 0)
             return fmt_float(n, 2)
 
-        # --- Section definitions ---
         SECTIONS: Dict[str, list[str]] = {
-            "Areas": [
-                "gross_bulk_m2",
-                "sellable_area_m2",
-                "units_estimate",
-                "market_area_m2",
-                "affordable_area_m2",
-            ],
+            "Areas": ["gross_bulk_m2", "sellable_area_m2", "units_estimate", "market_area_m2", "affordable_area_m2"],
             "Revenue": ["gdv"],
             "Costs": [
-                "build_cost_psm_effective",
-                "cost_uplift_factor",
-                "affordable_cost_multiplier",
-                "build_cost",
-                "contingency",
-                "escalation",
-                "professional_fees",
-                "rates_taxes",
-                "base_costs",
-                "marketing",
-                "finance",
-                "finance_marketing",
-                "total_costs_ex_profit",
+                "build_cost_psm_effective", "cost_uplift_factor", "affordable_cost_multiplier",
+                "build_cost", "contingency", "escalation", "professional_fees", "rates_taxes",
+                "base_costs", "marketing", "finance", "finance_marketing", "total_costs_ex_profit",
             ],
             "Profit": ["profit_basis", "profit_base", "profit"],
             "Land": ["residual_land_value", "acquisition_costs"],
@@ -242,7 +228,6 @@ def render_audit(
         df["Item"] = df["Item"].astype(str)
         df["Value"] = df["Value"].astype(str)
 
-        # ✅ Correct Streamlit param:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         if show_raw_json:

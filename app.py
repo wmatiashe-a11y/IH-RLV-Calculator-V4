@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 import json
 
 import pandas as pd
@@ -59,7 +59,7 @@ def _diff_dicts(new: Dict[str, Any], old: Dict[str, Any]) -> pd.DataFrame:
 
 
 # =========================================================
-# WATERFALL (Developer-style)
+# WATERFALL
 # =========================================================
 
 def render_audit_waterfall(
@@ -89,7 +89,6 @@ def render_audit_waterfall(
     rlv = _num(audit, "residual_land_value", 0.0)
     acquisition = _num(audit, "acquisition_costs", 0.0)
 
-    # Prefer detailed finance + marketing if present; otherwise use combined legacy key
     use_combined = (marketing == 0.0 and finance == 0.0 and finance_marketing != 0.0)
 
     cost_items = [
@@ -104,10 +103,8 @@ def render_audit_waterfall(
     else:
         cost_items.extend([("Marketing", marketing), ("Finance", finance)])
 
-    # Only keep non-zero items (keeps chart tidy)
     cost_items = [(n, v) for n, v in cost_items if abs(v) > 1e-9]
 
-    # If RLV not provided, compute it
     computed_rlv = gdv - sum(v for _, v in cost_items) - abs(profit)
     rlv_to_show = rlv if abs(rlv) > 1e-9 else computed_rlv
 
@@ -153,9 +150,8 @@ def render_audit_waterfall(
             yaxis_title="ZAR",
             showlegend=False,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
-        # Optional: acquisition bridge
         if abs(acquisition) > 1e-9:
             st.markdown("#### Acquisition impact (post-RLV)")
             fig2 = go.Figure(
@@ -173,11 +169,11 @@ def render_audit_waterfall(
                 yaxis_title="ZAR",
                 showlegend=False,
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
 
 
 # =========================================================
-# AUDIT TABLE (Clean + Diff + Download)
+# AUDIT TABLE
 # =========================================================
 
 def render_audit(
@@ -215,7 +211,6 @@ def render_audit(
 
         st.divider()
 
-        # Download JSON
         try:
             audit_json = json.dumps(audit, indent=2, default=str).encode("utf-8")
             st.download_button(
@@ -223,12 +218,11 @@ def render_audit(
                 data=audit_json,
                 file_name="audit_trail.json",
                 mime="application/json",
-                use_container_width=True,
+                width="stretch",
             )
         except Exception:
             st.warning("Could not serialize audit to JSON.")
 
-        # Diff vs previous run
         if previous_audit:
             st.divider()
             st.markdown("#### Changes since previous run")
@@ -236,7 +230,7 @@ def render_audit(
             if changes.empty:
                 st.success("No changes detected.")
             else:
-                st.dataframe(changes, use_container_width=True, hide_index=True)
+                st.dataframe(changes, width="stretch", hide_index=True)
 
         st.divider()
         st.markdown("#### Audit Table")
@@ -351,7 +345,7 @@ def render_audit(
         df["Item"] = df["Item"].astype(str)
         df["Value"] = df["Value"].astype(str)
 
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
         if show_raw_json:
             with st.expander("🔍 Raw audit JSON", expanded=False):
@@ -359,7 +353,7 @@ def render_audit(
 
 
 # =========================================================
-# MINIMAL ENGINE (Replace with your full RLV engine later)
+# MINIMAL FEASIBILITY ENGINE (so app runs end-to-end)
 # =========================================================
 
 def compute_feasibility(
@@ -379,11 +373,10 @@ def compute_feasibility(
     finance_rate: float,
     profit_rate: float,
 ) -> Dict[str, Any]:
-    # Bulk / areas
     gross_bulk_m2 = plot_size_m2 * floor_factor
     sellable_area_m2 = gross_bulk_m2 * efficiency
 
-    if include_affordable:
+    if include_affordable and affordable_share > 0:
         affordable_area_m2 = sellable_area_m2 * affordable_share
         market_area_m2 = sellable_area_m2 - affordable_area_m2
         gdv = (market_area_m2 * exit_price_psm) + (affordable_area_m2 * affordable_price_psm)
@@ -392,7 +385,6 @@ def compute_feasibility(
         market_area_m2 = sellable_area_m2
         gdv = sellable_area_m2 * exit_price_psm
 
-    # Costs (simple)
     build_cost = gross_bulk_m2 * build_cost_psm
     contingency = build_cost * contingency_rate
     escalation = build_cost * escalation_rate
@@ -410,17 +402,12 @@ def compute_feasibility(
 
     residual_land_value = gdv - total_costs_ex_profit - profit
 
-    audit = {
-        # Areas
+    return {
         "gross_bulk_m2": gross_bulk_m2,
         "sellable_area_m2": sellable_area_m2,
         "market_area_m2": market_area_m2,
         "affordable_area_m2": affordable_area_m2,
-
-        # Revenue
         "gdv": gdv,
-
-        # Costs
         "build_cost_psm_effective": build_cost_psm,
         "build_cost": build_cost,
         "contingency": contingency,
@@ -431,16 +418,10 @@ def compute_feasibility(
         "marketing": marketing,
         "finance": finance,
         "total_costs_ex_profit": total_costs_ex_profit,
-
-        # Profit
         "profit_basis": "GDV",
         "profit_base": profit_base,
         "profit": profit,
-
-        # Land
         "residual_land_value": residual_land_value,
-
-        # Inputs snapshot (nice for debugging)
         "inputs": {
             "plot_size_m2": plot_size_m2,
             "floor_factor": floor_factor,
@@ -450,13 +431,12 @@ def compute_feasibility(
             "include_affordable": include_affordable,
             "affordable_share": affordable_share,
             "affordable_price_psm": affordable_price_psm,
-        }
+        },
     }
-    return audit
 
 
 # =========================================================
-# STREAMLIT UI
+# STREAMLIT APP
 # =========================================================
 
 st.set_page_config(page_title="IH RLV Calculator", layout="wide")
@@ -505,7 +485,6 @@ audit = compute_feasibility(
     profit_rate=profit_rate,
 )
 
-# Output cards
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("GDV", _money(_num(audit, "gdv")))
 c2.metric("Total costs (ex profit)", _money(_num(audit, "total_costs_ex_profit")))
@@ -514,7 +493,6 @@ c4.metric("Residual Land Value", _money(_num(audit, "residual_land_value")))
 
 st.divider()
 
-# Previous audit for diffing
 if "prev_audit" not in st.session_state:
     st.session_state.prev_audit = None
 

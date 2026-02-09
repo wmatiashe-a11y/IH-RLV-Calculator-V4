@@ -59,7 +59,7 @@ def _diff_dicts(new: Dict[str, Any], old: Dict[str, Any]) -> pd.DataFrame:
 
 
 # =========================================================
-# WATERFALL
+# WATERFALL (Developer-style)
 # =========================================================
 
 def render_audit_waterfall(
@@ -89,6 +89,7 @@ def render_audit_waterfall(
     rlv = _num(audit, "residual_land_value", 0.0)
     acquisition = _num(audit, "acquisition_costs", 0.0)
 
+    # Prefer detailed finance + marketing if present; otherwise use combined legacy key
     use_combined = (marketing == 0.0 and finance == 0.0 and finance_marketing != 0.0)
 
     cost_items = [
@@ -173,7 +174,7 @@ def render_audit_waterfall(
 
 
 # =========================================================
-# AUDIT TABLE
+# AUDIT TABLE (Clean + Diff + Download)
 # =========================================================
 
 def render_audit(
@@ -203,6 +204,7 @@ def render_audit(
 
     with st.expander(title, expanded=expanded):
         st.markdown("#### Summary")
+
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Fields", len(audit))
         col2.metric("Money items", money_count)
@@ -231,6 +233,13 @@ def render_audit(
                 st.success("No changes detected.")
             else:
                 st.dataframe(changes, width="stretch", hide_index=True)
+                st.download_button(
+                    "⬇️ Download changes (CSV)",
+                    data=changes.to_csv(index=False).encode("utf-8"),
+                    file_name="audit_changes.csv",
+                    mime="text/csv",
+                    width="stretch",
+                )
 
         st.divider()
         st.markdown("#### Audit Table")
@@ -287,6 +296,7 @@ def render_audit(
                 return v
             if isinstance(v, bool):
                 return "Yes" if v else "No"
+
             try:
                 n = float(v)
             except Exception:
@@ -353,7 +363,7 @@ def render_audit(
 
 
 # =========================================================
-# MINIMAL FEASIBILITY ENGINE (so app runs end-to-end)
+# MINIMAL ENGINE (so app runs end-to-end)
 # =========================================================
 
 def compute_feasibility(
@@ -436,7 +446,7 @@ def compute_feasibility(
 
 
 # =========================================================
-# STREAMLIT APP
+# STREAMLIT UI
 # =========================================================
 
 st.set_page_config(page_title="IH RLV Calculator", layout="wide")

@@ -5,6 +5,167 @@ import json
 import pandas as pd
 import streamlit as st
 
+import plotly.graph_objects as go
+
+
+def _num(audit: Dict[str, Any], key: str, default: float = 0.0) -> float:
+    """Safely fetch a numeric value from audit."""
+    v = audit.get(key, default)
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def render_audit_waterfall(
+    audit: Dict[str, Any],
+    *,
+    title: str = "📉 Developer Waterfall (GDV → RLV)",
+    expanded: bool = True,
+    show_key_drivers: bool = True,
+) -> None:
+    if not audit:
+        st.info("No audit data available for waterfall.")
+        return
+
+    # Core money values (expected from your audit)
+    gdv = _num(audit, "gdv", 0.0)
+    build_cost = _num(audit, "build_cost", 0.0)
+    contingency = _num(audit, "contingency", 0.0)
+    escalation = _num(audit, "escalation", 0.0)
+    professional_fees = _num(audit, "professional_fees", 0.0)
+    rates_taxes = _num(audit, "rates_taxes", 0.0)
+    marketing = _num(audit, "marketing", 0.0)
+    finance = _num(audit, "finance", 0.0)
+
+    # Some apps use either "finance_marketing" legacy combined value
+    finance_marketing = _num(audit, "finance_marketing", 0.0)
+
+    # Profit / RLV
+    profit = _num(audit, "profit", 0.0)
+    rlv = _num(audit, "residual_land_value", 0.0)
+    acquisition = _num(audit, "acquisition_costs", 0.0)
+
+    # Prefer detailed finance + marketing if present; otherwise use combined
+    use_combined = (marketing == 0.0 and finance == 0.0 and finance_marketing != 0.0)
+
+    # Build a cost stack (positive values in audit → negative steps in waterfall)
+    cost_items = [
+        ("Build cost", build_cost),
+        ("Contingency", contingency),
+        ("Escalation", escalation),
+        ("Professional fees", professional_fees),
+        ("Rates & taxes", rates_taxes),
+    ]
+
+    if use_combined:
+        cost_items.append(("Finance + marketing", finance_marketing))
+    else:
+        cost_items.extend([
+            ("Marketing", marketing),
+            ("Finance", finance),
+        ])
+
+    # Only keep non-zero items (keeps chart tidy)
+    cost_items = [(n, v) for n, v in cost_items if abs(v) > 1e-9]
+
+    with st.expander(title, expanded=expanded):
+        # --- Key drivers row (optional)
+        if show_key_drivers:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("GDV", _money(gdv))
+            c2.metric("Total costs (ex profit)", _money(_num(audit, "total_costs_ex_profit", sum(v for _, v in cost_items))))
+            c3.metric("Profit", _money(profit))
+            c4.metric("Residual land value", _money(rlv))
+
+            # Optional “bulk/area” drivers if present
+            gb = audit.get("gross_bulk_m2")
+            sa = audit.get("sellable_area_m2")
+            if gb is not None or sa is not None:
+                st.caption(
+                    " • ".join(
+                        [f"Gross bulk: {gb:.0f} m²" if isinstance(gb, (int, float)) else f"Gross bulk: {gb}" if gb is not None else "",
+                         f"Sellable area: {sa:.0f} m²" if isinstance(sa, (int, float)) else f"Sellable area: {sa}" if sa is not None else ""]
+                    ).strip(" •")
+                )
+
+        # --- Waterfall steps
+        labels = ["GDV"]
+        measures = ["absolute"]
+        values = [gdv]
+
+        # Costs as negative deltas
+        for name, val in cost_items:
+            labels.append(name)
+            measures.append("relative")
+            values.append(-abs(val))
+
+        # Profit as negative delta (only if present)
+        if abs(profit) > 1e-9:
+            labels.append("Profit")
+            measures.append("relative")
+            values.append(-abs(profit))
+
+        # Show RLV as a total (preferred, uses your computed rlv if present)
+        # If rlv isn't present, compute it: GDV - sum(costs) - profit
+        computed_rlv = gdv - sum(v for _, v in cost_items) - abs(profit)
+        rlv_to_show = rlv if abs(rlv) > 1e-9 else computed_rlv
+
+        labels.append("Residual land value")
+        measures.append("total")
+        values.append(rlv_to_show)
+
+        fig = go.Figure(
+            go.Waterfall(
+                name="Feasibility",
+                orientation="v",
+                measure=measures,
+                x=labels,
+                y=values,
+                connector={"line": {"width": 1}},
+            )
+        )
+
+        fig.update_layout(
+            margin=dict(l=10, r=10, t=30, b=10),
+            height=420,
+            title=dict(text="", x=0.0),
+            yaxis_title="ZAR",
+            showlegend=False,
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- Optional: Acquisition bridge (post-RLV)
+        if abs(acquisition) > 1e-9:
+            st.markdown("#### Acquisition impact (post-RLV)")
+            fig2 = go.Figure(
+                go.Waterfall(
+                    orientation="v",
+                    measure=["absolute", "relative", "total"],
+                    x=["Residual land value", "Acquisition costs", "Net land (after acquisition)"],
+                    y=[rlv_to_show, -abs(acquisition), rlv_to_show - abs(acquisition)],
+                    connector={"line": {"width": 1}},
+                )
+            )
+            fig2.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10),
+                height=320,
+                yaxis_title="ZAR",
+                showlegend=False,
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+        # --- Breakdown table
+        st.markdown("#### Breakdown")
+        breakdown_rows = [{"Item": "GDV", "Value": _money(gdv)}]
+        for n, v in cost_items:
+            breakdown_rows.append({"Item": n, "Value": f"-{_money(abs(v))}"})
+        if abs(profit) > 1e-9:
+            breakdown_rows.append({"Item": "Profit", "Value": f"-{_money(abs(profit))}"})
+        breakdown_rows.append({"Item": "Residual land value", "Value": _money(rlv_to_show)})
+
+        st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
 
 def _money(x: float) -> str:
     """Format money as South African Rand with spaced thousands (e.g. R1 234 567)."""
